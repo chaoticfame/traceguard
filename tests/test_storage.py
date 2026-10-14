@@ -3,11 +3,17 @@
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+import json
 import sqlite3
 import tempfile
 import unittest
 
 from traceguard.parser import AuthEvent, parse_line
+from traceguard.config import DetectionConfig
+from traceguard.detector import (
+    correlate_success_after_failure_bursts,
+    detect_failure_bursts,
+)
 from traceguard.storage import (
     MAX_STORED_OCCURRENCES,
     EventStore,
@@ -140,6 +146,135 @@ class EventStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(StorageError, "closed"):
             self.store.list_occurrences()
+
+
+class FindingStoreTests(unittest.TestCase):
+    """Exercise detector-to-storage provenance using synthetic duplicate lines."""
+
+    def setUp(self) -> None:
+        """Store duplicate failure occurrences and a subsequent success."""
+        self.store = EventStore(":memory:")
+        self.failures = [event(), event()]
+        self.success = event(LINE.replace("Failed", "Accepted").replace(
+            "invalid user ", "").replace("09:10:11", "09:10:12"))
+        self.events = [*self.failures, self.success]
+        self.occurrences = self.store.store_occurrences(
+            SOURCE, list(enumerate(self.events, 1)),
+        )
+        policy = DetectionConfig(failure_threshold=2)
+        self.burst, = detect_failure_bursts(self.events, policy)
+        self.correlation, = correlate_success_after_failure_bursts(
+            self.events, [self.burst], policy,
+        )
+        self.refs = tuple(item.occurrence_id for item in self.occurrences)
+
+    def tearDown(self) -> None:
+        """Close the isolated store."""
+        self.store.close()
+
+    def test_round_trip_and_idempotent_import(self) -> None:
+        """Preserve the payload, ordered duplicate evidence, and correlations."""
+        records = [(self.burst, self.refs[:2]), (self.correlation, self.refs)]
+        first = self.store.store_findings(records)
+        self.assertEqual(self.store.store_findings(records), first)
+        self.assertEqual(self.store.list_findings(),
+                         sorted(first, key=lambda item: item.storage_id))
+        self.assertEqual(json.loads(first[0].payload_json)["finding_type"],
+                         "failure_burst")
+        self.assertEqual(json.loads(first[1].payload_json)["success_event_id"],
+                         self.success.event_id)
+        self.assertEqual(first[0].occurrence_ids, self.refs[:2])
+
+    def test_orphan_rolls_back_preceding_valid_finding(self) -> None:
+        """A later orphan must undo earlier finding and evidence insertions."""
+        with self.assertRaisesRegex(StorageError, "orphaned"):
+            self.store.store_findings([
+                (self.burst, self.refs[:2]),
+                (self.correlation, (*self.refs[:2], "f" * 64)),
+            ])
+        self.assertEqual(self.store.list_findings(), [])
+        self.assertEqual(len(self.store.list_occurrences()), 3)
+        self.assertEqual(self.store._require_connection().execute(
+            "SELECT count(*) FROM finding_evidence").fetchone()[0], 0)
+
+    def test_mismatched_fingerprint_is_rejected(self) -> None:
+        """Existing evidence is insufficient if it belongs to another event."""
+        with self.assertRaisesRegex(StorageError, "mismatched"):
+            self.store.store_findings([(self.correlation, tuple(reversed(self.refs)))])
+        self.assertEqual(self.store.list_findings(), [])
+
+    def test_reusing_occurrence_is_rejected(self) -> None:
+        """Two identical fingerprints still require two distinct occurrences."""
+        with self.assertRaisesRegex(ValueError, "reuse"):
+            self.store.store_findings([(self.burst, (self.refs[0], self.refs[0]))])
+
+    def test_source_aware_finding_identity(self) -> None:
+        """The same detector output from another source is distinct evidence."""
+        other = self.store.store_occurrences(
+            sha256(b"second source").hexdigest(),
+            list(enumerate(self.events, 1)),
+        )
+        first, second = self.store.store_findings([
+            (self.burst, self.refs[:2]),
+            (self.burst, tuple(item.occurrence_id for item in other[:2])),
+        ])
+        self.assertNotEqual(first.storage_id, second.storage_id)
+        self.assertEqual(first.payload_json, second.payload_json)
+
+    def test_limits_and_invalid_findings(self) -> None:
+        """Reject malformed references and bounded-batch violations."""
+        for records in ([(object(), self.refs)], [(self.burst, ())],
+                        [(self.burst, ("not-a-digest", self.refs[1]))],
+                        [(self.burst, self.refs[:2])] * 10_001):
+            with self.assertRaises(ValueError):
+                self.store.store_findings(records)
+        with self.assertRaisesRegex(ValueError, "20000"):
+            self.store.store_findings([(self.correlation, self.refs)] * 6667)
+        for limit in (0, True, 10_001):
+            with self.assertRaises(ValueError):
+                self.store.list_findings(limit=limit)
+        self.assertEqual(self.store.list_findings(), [])
+
+    def test_database_enforces_foreign_keys(self) -> None:
+        """Direct SQL cannot attach a finding to a missing occurrence."""
+        stored, = self.store.store_findings([(self.burst, self.refs[:2])])
+        connection = self.store._require_connection()
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute("INSERT INTO finding_evidence VALUES (?, ?, ?)",
+                               (stored.storage_id, 2, "f" * 64))
+
+    def test_sql_failure_rolls_back_payload_and_links(self) -> None:
+        """A database failure after payload insertion cannot leave partial data."""
+        connection = self.store._require_connection()
+        connection.execute(
+            "CREATE TRIGGER reject_evidence BEFORE INSERT ON finding_evidence "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END"
+        )
+        with self.assertRaisesRegex(StorageError, "Unable to store findings"):
+            self.store.store_findings([(self.burst, self.refs[:2])])
+        self.assertEqual(self.store.list_findings(), [])
+        self.assertEqual(connection.execute(
+            "SELECT count(*) FROM finding_evidence").fetchone()[0], 0)
+
+    def test_upgrade_preserves_occurrences_and_reopen_preserves_findings(self) -> None:
+        """Upgrade a Day 6 schema without deleting its existing evidence."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version1.db"
+            with EventStore(path) as initial:
+                occurrences = initial.store_occurrences(
+                    SOURCE, list(enumerate(self.events, 1)))
+            with sqlite3.connect(path) as connection:
+                connection.executescript(
+                    "DROP TABLE finding_evidence; DROP TABLE findings; "
+                    "PRAGMA user_version = 1;"
+                )
+            with EventStore(path) as upgraded:
+                self.assertEqual(upgraded.list_occurrences(), occurrences)
+                expected = upgraded.store_findings([(self.burst, self.refs[:2])])
+            with EventStore(path) as reopened:
+                self.assertEqual(reopened.list_findings(), expected)
+                self.assertEqual(reopened._require_connection().execute(
+                    "PRAGMA user_version").fetchone()[0], 2)
 
 
 if __name__ == "__main__":

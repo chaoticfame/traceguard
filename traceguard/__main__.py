@@ -16,6 +16,7 @@ from .detector import (
     detect_failure_bursts,
 )
 from .parser import AuthEvent, parse_line
+from .explanations import MAX_AI_FINDINGS, explain_finding
 
 _MAX_LINE_CHARS = 8192
 
@@ -137,12 +138,20 @@ def _run_triage(args: argparse.Namespace) -> int:
     correlations = correlate_success_after_failure_bursts(
         events, bursts, policy,
     )
-    for finding in bursts:
-        print(json.dumps(_failure_dict(finding), ensure_ascii=True,
-                         separators=(",", ":")))
-    for finding in correlations:
-        print(json.dumps(_success_dict(finding), ensure_ascii=True,
-                         separators=(",", ":")))
+    ai_requested = args.ai_model is not None or args.offline
+    findings: list[FailureBurst | SuccessAfterFailure] = [*bursts, *correlations]
+    for index, finding in enumerate(findings):
+        record = (_failure_dict(finding) if isinstance(finding, FailureBurst)
+                  else _success_dict(finding))
+        if ai_requested:
+            record["explanation"] = (
+                {"status": "skipped_limit", "annotation": None}
+                if index >= MAX_AI_FINDINGS and not args.offline
+                else explain_finding(finding, model=args.ai_model, offline=args.offline)
+            )
+        print(json.dumps(record, ensure_ascii=True, separators=(",", ":")))
+    if ai_requested and not findings:
+        print("ai_status=no_findings", file=sys.stderr)
     print(
         f"parsed={len(events)} skipped={skipped} "
         f"failure_bursts={len(bursts)} "
@@ -175,6 +184,10 @@ def _triage_parser() -> argparse.ArgumentParser:
                         default=defaults.failure_window_seconds, metavar="SECONDS")
     parser.add_argument("--success-window-seconds", type=int,
                         default=defaults.success_window_seconds, metavar="SECONDS")
+    parser.add_argument("--ai-model", metavar="MODEL",
+                        help="opt in to local explanations for at most 10 findings")
+    parser.add_argument("--offline", action="store_true",
+                        help="disable AI requests even when --ai-model is supplied")
     return parser
 
 

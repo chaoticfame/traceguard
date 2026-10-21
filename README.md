@@ -2,6 +2,28 @@
 
 Evidence-first SSH authentication log triage, with local AI explanations planned after deterministic detection works.
 
+## End-to-end CLI MVP
+
+TraceGuard can now parse one local SSH log, detect review candidates, persist
+source-position evidence in SQLite, and atomically export a versioned JSON
+report with one command:
+
+```sh
+python -m traceguard pipeline examples/auth.log --year 2026 --failure-threshold 2 --database traceguard.sqlite3 --report reports/traceguard.json
+```
+
+Create the `reports` directory first. Repeating the command for unchanged input
+is idempotent: identical log lines remain distinct occurrences, while existing
+source positions and findings are not duplicated. The default is fully offline.
+Local Ollama annotations are opt-in with `--ai-model MODEL`; `--offline` always
+disables model requests. AI receives sanitized evidence only and never changes
+detector results. Reports and SQLite databases contain normalized identifiers
+and must be treated as private. Do not commit real logs, databases, or reports.
+
+The command prints only bounded counts to stdout. The report contains its schema
+version, SHA-256 source digest, detection configuration, exact evidence links,
+and explanation statuses. A source digest records provenance, not authenticity.
+
 ## Day 1: normalized authentication events
 
 Commit: `feat(parser): normalize SSH authentication events with a tested CLI`

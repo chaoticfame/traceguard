@@ -2,9 +2,13 @@
 
 import argparse
 from collections.abc import Iterator, Sequence
+from hashlib import sha256
+import io
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 from typing import TextIO
 
 from .config import DetectionConfig
@@ -17,6 +21,8 @@ from .detector import (
 )
 from .parser import AuthEvent, parse_line
 from .explanations import MAX_AI_FINDINGS, explain_finding
+from .report import export_report
+from .storage import EventOccurrence, EventStore, StorageError
 
 _MAX_LINE_CHARS = 8192
 
@@ -161,6 +167,159 @@ def _run_triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _matching_occurrence(
+    finding: FailureBurst | SuccessAfterFailure,
+    fingerprint: str,
+    outcome: str,
+    occurrences: list[EventOccurrence],
+    excluded: set[str],
+) -> EventOccurrence:
+    """Select the first exact source occurrence not already allocated."""
+    match = next((
+        item for item in occurrences
+        if item.occurrence_id not in excluded
+        and item.event.event_id == fingerprint
+        and item.event.host == finding.host
+        and item.event.username == finding.username
+        and item.event.source_ip == finding.source_ip
+        and item.event.outcome == outcome
+    ), None)
+    if match is None:
+        raise ValueError("Unable to link finding to parsed evidence")
+    return match
+
+
+def _link_findings(
+    findings: list[FailureBurst | SuccessAfterFailure],
+    occurrences: list[EventOccurrence],
+) -> list[tuple[FailureBurst | SuccessAfterFailure, tuple[str, ...]]]:
+    """Attach exact occurrences while preserving detector consumption rules."""
+    linked: list[tuple[FailureBurst | SuccessAfterFailure, tuple[str, ...]]] = []
+    burst_links: dict[str, tuple[str, ...]] = {}
+    allocated_failures: set[str] = set()
+    allocated_successes: set[str] = set()
+    by_id = {item.occurrence_id: item for item in occurrences}
+    for finding in findings:
+        if isinstance(finding, FailureBurst):
+            references: list[str] = []
+            for fingerprint in finding.evidence_ids:
+                match = _matching_occurrence(
+                    finding, fingerprint, "failure", occurrences,
+                    allocated_failures,
+                )
+                allocated_failures.add(match.occurrence_id)
+                references.append(match.occurrence_id)
+            result = tuple(references)
+            burst_links[finding.finding_id] = result
+        else:
+            failures = burst_links.get(finding.burst_finding_id)
+            if (failures is None
+                    or tuple(by_id[item].event.event_id for item in failures)
+                    != finding.evidence_ids[:-1]):
+                raise ValueError("Correlation does not reference a stored burst")
+            success = _matching_occurrence(
+                finding, finding.success_event_id, "success", occurrences,
+                allocated_successes,
+            )
+            allocated_successes.add(success.occurrence_id)
+            result = (*failures, success.occurrence_id)
+        linked.append((finding, result))
+    return linked
+
+
+def _write_private_report(path: Path, document: str) -> None:
+    """Atomically replace one local report with restrictive file permissions."""
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="ascii", newline="\n", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            stream.write(document)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except (OSError, UnicodeError):
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def _run_pipeline(args: argparse.Namespace) -> int:
+    """Parse, detect, persist and export one evidence-linked local report."""
+    try:
+        paths = [args.log.resolve(), args.database.resolve(), args.report.resolve()]
+        if len(set(paths)) != len(paths):
+            raise ValueError("Log, database, and report paths must be distinct")
+        policy = DetectionConfig(
+            failure_threshold=args.failure_threshold,
+            failure_window_seconds=args.failure_window_seconds,
+            success_window_seconds=args.success_window_seconds,
+        )
+        records: list[tuple[int, AuthEvent]] = []
+        skipped = 0
+        digest = sha256()
+        with args.log.open("rb") as raw:
+            while chunk := raw.read(65_536):
+                digest.update(chunk)
+            raw.seek(0)
+            with io.TextIOWrapper(raw, encoding="utf-8", errors="strict") as stream:
+                for line_number, event in enumerate(_iter_records(
+                    stream, year=args.year,
+                    utc_offset_minutes=args.utc_offset_minutes,
+                ), 1):
+                    if event is None:
+                        skipped += 1
+                        continue
+                    if len(records) >= MAX_BATCH_EVENTS:
+                        raise ValueError("Pipeline input exceeds 10000 parsed events")
+                    records.append((line_number, event))
+
+        source_digest = digest.hexdigest()
+        events = [event for _, event in records]
+        bursts = detect_failure_bursts(events, policy)
+        correlations = correlate_success_after_failure_bursts(events, bursts, policy)
+        findings: list[FailureBurst | SuccessAfterFailure] = [*bursts, *correlations]
+        statuses: list[str] = []
+        for index, finding in enumerate(findings):
+            result = ({"status": "skipped_limit", "annotation": None}
+                      if args.ai_model is not None and not args.offline
+                      and index >= MAX_AI_FINDINGS
+                      else explain_finding(
+                          finding, model=args.ai_model, offline=args.offline,
+                      ))
+            statuses.append(str(result["status"]))
+
+        with EventStore(args.database) as store:
+            occurrences = store.store_occurrences(source_digest, records)
+            stored = store.store_findings(_link_findings(findings, occurrences))
+            report = export_report(
+                source_digest=source_digest,
+                config=policy,
+                occurrences=store.list_occurrences(source_digest),
+                findings=stored,
+                explanation_statuses={item.storage_id: status
+                                      for item, status in zip(stored, statuses)},
+            )
+            occurrence_count = len(store.list_occurrences(source_digest))
+        _write_private_report(args.report, report)
+    except (OSError, UnicodeError, ValueError, RuntimeError, StorageError) as exc:
+        print(f"traceguard: {exc}", file=sys.stderr)
+        return 2
+
+    print(json.dumps({
+        "parsed": len(records), "skipped": skipped,
+        "occurrences": occurrence_count, "findings": len(findings),
+        "schema_version": 1,
+    }, separators=(",", ":")))
+    return 0
+
+
 def _parse_parser() -> argparse.ArgumentParser:
     """Build the backward-compatible parser command."""
     parser = argparse.ArgumentParser(
@@ -191,9 +350,34 @@ def _triage_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _pipeline_parser() -> argparse.ArgumentParser:
+    """Build the end-to-end local evidence pipeline command."""
+    parser = argparse.ArgumentParser(
+        prog="python -m traceguard pipeline",
+        description="Persist SSH evidence and atomically export a versioned report.",
+    )
+    _add_log_arguments(parser)
+    parser.add_argument("--database", type=Path, required=True, metavar="PATH")
+    parser.add_argument("--report", type=Path, required=True, metavar="PATH")
+    defaults = DetectionConfig()
+    parser.add_argument("--failure-threshold", type=int,
+                        default=defaults.failure_threshold, metavar="COUNT")
+    parser.add_argument("--failure-window-seconds", type=int,
+                        default=defaults.failure_window_seconds, metavar="SECONDS")
+    parser.add_argument("--success-window-seconds", type=int,
+                        default=defaults.success_window_seconds, metavar="SECONDS")
+    parser.add_argument("--ai-model", metavar="MODEL",
+                        help="opt in to local explanations for at most 10 findings")
+    parser.add_argument("--offline", action="store_true",
+                        help="disable AI requests even when --ai-model is supplied")
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch the triage subcommand or the original parser interface."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "pipeline":
+        return _run_pipeline(_pipeline_parser().parse_args(arguments[1:]))
     if arguments and arguments[0] == "triage":
         return _run_triage(_triage_parser().parse_args(arguments[1:]))
     return _run_parse(_parse_parser().parse_args(arguments))

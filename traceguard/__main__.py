@@ -2,8 +2,6 @@
 
 import argparse
 from collections.abc import Iterator, Sequence
-from hashlib import sha256
-import io
 import json
 import os
 from pathlib import Path
@@ -21,6 +19,7 @@ from .detector import (
 )
 from .parser import AuthEvent, parse_line
 from .explanations import MAX_AI_FINDINGS, explain_finding
+from .ingest import ingest_file
 from .report import export_report
 from .storage import EventOccurrence, EventStore, StorageError
 
@@ -261,26 +260,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             failure_window_seconds=args.failure_window_seconds,
             success_window_seconds=args.success_window_seconds,
         )
-        records: list[tuple[int, AuthEvent]] = []
-        skipped = 0
-        digest = sha256()
-        with args.log.open("rb") as raw:
-            while chunk := raw.read(65_536):
-                digest.update(chunk)
-            raw.seek(0)
-            with io.TextIOWrapper(raw, encoding="utf-8", errors="strict") as stream:
-                for line_number, event in enumerate(_iter_records(
-                    stream, year=args.year,
-                    utc_offset_minutes=args.utc_offset_minutes,
-                ), 1):
-                    if event is None:
-                        skipped += 1
-                        continue
-                    if len(records) >= MAX_BATCH_EVENTS:
-                        raise ValueError("Pipeline input exceeds 10000 parsed events")
-                    records.append((line_number, event))
-
-        source_digest = digest.hexdigest()
+        batch = ingest_file(
+            args.log, year=args.year,
+            utc_offset_minutes=args.utc_offset_minutes,
+        )
+        records = list(batch.records)
+        source_digest = batch.source_digest
         events = [event for _, event in records]
         bursts = detect_failure_bursts(events, policy)
         correlations = correlate_success_after_failure_bursts(events, bursts, policy)
@@ -313,10 +298,16 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         return 2
 
     print(json.dumps({
-        "parsed": len(records), "skipped": skipped,
+        "parsed": len(records), "skipped": batch.rejections.total,
         "occurrences": occurrence_count, "findings": len(findings),
         "schema_version": 1,
     }, separators=(",", ":")))
+    print(
+        f"rejected_records={batch.rejections.total} "
+        f"unsupported={batch.rejections.unsupported} "
+        f"event_limit={batch.rejections.event_limit}",
+        file=sys.stderr,
+    )
     return 0
 
 

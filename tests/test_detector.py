@@ -9,8 +9,10 @@ import unittest
 from traceguard.config import DetectionConfig
 from traceguard.detector import (
     MAX_BATCH_EVENTS,
+    DistributedAccountAttempt,
     FailureBurst,
     correlate_success_after_failure_bursts,
+    detect_distributed_account_attempts,
     detect_failure_bursts,
 )
 from traceguard.parser import AuthEvent
@@ -232,6 +234,131 @@ class CorrelationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds 10000"):
             correlate_success_after_failure_bursts(
                 [], [self.burst] * (MAX_BATCH_EVENTS + 1), self.config,
+            )
+
+
+class DistributedAccountTests(unittest.TestCase):
+    """Check distinct-source account targeting and exact provenance."""
+
+    def setUp(self) -> None:
+        self.config = DetectionConfig(
+            distributed_source_threshold=3, failure_window_seconds=10,
+        )
+
+    @staticmethod
+    def source(second: float, address: str, identifier: str) -> AuthEvent:
+        """Build one failed authentication from a chosen source."""
+        return event(
+            second, identifier=identifier, source_ip=address,
+            source_port=2000 + int(identifier.removeprefix("e")),
+        )
+
+    def test_exact_distinct_source_threshold_and_evidence(self) -> None:
+        """Emit at the threshold with one exact occurrence per source."""
+        records = [
+            self.source(0, "192.0.2.1", "e1"),
+            self.source(1, "192.0.2.2", "e2"),
+            self.source(2, "192.0.2.3", "e3"),
+        ]
+        self.assertEqual(
+            detect_distributed_account_attempts(records[:2], self.config), [],
+        )
+        finding, = detect_distributed_account_attempts(records, self.config)
+        self.assertIsInstance(finding, DistributedAccountAttempt)
+        self.assertEqual(finding.source_count, 3)
+        self.assertEqual(
+            finding.source_ips, ("192.0.2.1", "192.0.2.2", "192.0.2.3"),
+        )
+        self.assertEqual(finding.evidence_ids, ("e1", "e2", "e3"))
+        self.assertEqual((finding.started_at, finding.ended_at),
+                         (records[0].timestamp, records[-1].timestamp))
+
+    def test_repeated_source_uses_latest_exact_evidence(self) -> None:
+        """Retries from one address count once and keep its latest evidence."""
+        records = [
+            self.source(0, "192.0.2.1", "e1"),
+            self.source(1, "192.0.2.1", "e2"),
+            self.source(2, "192.0.2.2", "e3"),
+            self.source(3, "192.0.2.3", "e4"),
+        ]
+        finding, = detect_distributed_account_attempts(records, self.config)
+        self.assertEqual(finding.source_count, 3)
+        self.assertEqual(finding.evidence_ids, ("e2", "e3", "e4"))
+        self.assertNotIn("e1", finding.evidence_ids)
+
+    def test_window_boundary_is_inclusive_and_expiration_is_strict(self) -> None:
+        """Accept exactly ten seconds and expire a source just beyond it."""
+        inclusive = [
+            self.source(0, "192.0.2.1", "e1"),
+            self.source(5, "192.0.2.2", "e2"),
+            self.source(10, "192.0.2.3", "e3"),
+        ]
+        self.assertEqual(len(detect_distributed_account_attempts(
+            inclusive, self.config,
+        )), 1)
+        outside = [*inclusive[:2], self.source(10.000001, "192.0.2.3", "e3")]
+        self.assertEqual(
+            detect_distributed_account_attempts(outside, self.config), [],
+        )
+
+    def test_target_identity_and_failure_outcome_are_required(self) -> None:
+        """Do not combine hosts/accounts or count successful logins."""
+        base = [
+            self.source(0, "192.0.2.1", "e1"),
+            self.source(1, "192.0.2.2", "e2"),
+        ]
+        for changes in (
+            {"host": "other-lab"}, {"username": "other-user"},
+            {"outcome": "success"},
+        ):
+            with self.subTest(changes=changes):
+                third = replace(
+                    self.source(2, "192.0.2.3", "e3"), **changes,
+                )
+                self.assertEqual(detect_distributed_account_attempts(
+                    [*base, third], self.config,
+                ), [])
+
+    def test_order_offsets_and_non_overlapping_groups_are_stable(self) -> None:
+        """Normalize UTC, consume evidence, and ignore input ordering."""
+        first = [
+            self.source(0, "192.0.2.1", "e1"),
+            self.source(1, "192.0.2.2", "e2"),
+            replace(self.source(2, "192.0.2.3", "e3"),
+                    timestamp="2026-10-10T08:00:02+08:00"),
+        ]
+        second = [
+            self.source(3, "192.0.2.4", "e4"),
+            self.source(4, "192.0.2.5", "e5"),
+            self.source(5, "192.0.2.6", "e6"),
+        ]
+        expected = detect_distributed_account_attempts(
+            [*first, *second], self.config,
+        )
+        actual = detect_distributed_account_attempts(
+            [*reversed(second), *reversed(first)], self.config,
+        )
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(actual), 2)
+        self.assertTrue(set(actual[0].evidence_ids).isdisjoint(
+            actual[1].evidence_ids,
+        ))
+        self.assertEqual(actual[0].ended_at, "2026-10-10T00:00:02+00:00")
+
+    def test_defaults_validation_and_batch_limit(self) -> None:
+        """Apply the default threshold and reuse bounded batch validation."""
+        records = [
+            self.source(i, f"192.0.2.{i + 1}", f"e{i + 1}")
+            for i in range(5)
+        ]
+        self.assertEqual(detect_distributed_account_attempts(records[:4]), [])
+        self.assertEqual(len(detect_distributed_account_attempts(records)), 1)
+        with self.assertRaises(ValueError):
+            detect_distributed_account_attempts([], {})
+        with self.assertRaisesRegex(ValueError, "exceeds 10000"):
+            detect_distributed_account_attempts(
+                [event(0, outcome="success")] * (MAX_BATCH_EVENTS + 1),
+                self.config,
             )
 
 

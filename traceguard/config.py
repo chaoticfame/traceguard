@@ -21,13 +21,15 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 class DetectionConfig:
     """Detection policy with integer seconds and inclusive numeric bounds.
 
-    A burst requires 2–10,000 failures. Both windows permit 1–86,400 seconds.
+    A burst requires 2–10,000 failures, and distributed-account detection
+    requires 2–10,000 distinct sources. Both windows permit 1–86,400 seconds.
     Defaults are starting policies, not evidence of account compromise.
     Type validation is enforced at runtime, including direct construction;
     booleans, floating-point numbers, and numeric strings are not integers here.
     """
 
     failure_threshold: int = 5
+    distributed_source_threshold: int = 5
     failure_window_seconds: int = 300
     success_window_seconds: int = 600
 
@@ -35,6 +37,8 @@ class DetectionConfig:
         """Enforce limits before configuration can reach a detector."""
         limits = (
             ("failure_threshold", self.failure_threshold, 2, 10_000),
+            ("distributed_source_threshold", self.distributed_source_threshold,
+             2, 10_000),
             ("failure_window_seconds", self.failure_window_seconds, 1, 86_400),
             ("success_window_seconds", self.success_window_seconds, 1, 86_400),
         )

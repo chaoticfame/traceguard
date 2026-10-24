@@ -62,6 +62,28 @@ class SuccessAfterFailure:
         return len(self.evidence_ids) - 1
 
 
+@dataclass(frozen=True, slots=True)
+class DistributedAccountAttempt:
+    """One account targeted by failures from several distinct sources.
+
+    Each source contributes exactly one event fingerprint to the finding.
+    This is an investigation lead and does not establish malicious intent.
+    """
+
+    finding_id: str
+    host: str
+    username: str
+    started_at: str
+    ended_at: str
+    source_ips: tuple[str, ...]
+    evidence_ids: tuple[str, ...]
+
+    @property
+    def source_count(self) -> int:
+        """Return the number of distinct sources supporting the finding."""
+        return len(self.source_ips)
+
+
 def _timestamp(event: AuthEvent) -> datetime:
     """Validate an event timestamp and normalize it to aware UTC."""
     if not isinstance(event, AuthEvent):
@@ -142,6 +164,66 @@ def detect_failure_bursts(
         findings.append(FailureBurst(sha256(fingerprint.encode()).hexdigest(),
                                     *key, start, end, evidence))
         window.clear()
+    return findings
+
+
+def detect_distributed_account_attempts(
+    events: Iterable[AuthEvent], config: DetectionConfig | None = None,
+) -> list[DistributedAccountAttempt]:
+    """Find accounts receiving failures from multiple distinct sources.
+
+    Group failures by target host and username within the inclusive configured
+    failure window. Retain the most recent event from each source, so repeated
+    attempts by one address cannot satisfy the distinct-source threshold. Once
+    a finding is emitted, consume its source set before building another
+    non-overlapping finding. Results and evidence ordering are deterministic,
+    input is capped by ``MAX_BATCH_EVENTS``, and successes do not contribute.
+    Complexity is O(n log n) time and O(n) space.
+    """
+    policy = DetectionConfig() if config is None else config
+    if not isinstance(policy, DetectionConfig):
+        raise ValueError("Detection requires a validated DetectionConfig")
+    ordered = _validated_batch(events)
+    windows: dict[
+        tuple[str, str], dict[str, tuple[datetime, AuthEvent]]
+    ] = {}
+    group_counts: dict[tuple[str, str], int] = {}
+    findings: list[DistributedAccountAttempt] = []
+    for stamp, event in ordered:
+        if event.outcome != "failure":
+            continue
+        key = (event.host, event.username)
+        sources = windows.setdefault(key, {})
+        expired = [
+            source for source, (seen, _) in sources.items()
+            if (stamp - seen).total_seconds() > policy.failure_window_seconds
+        ]
+        for source in expired:
+            del sources[source]
+        sources[event.source_ip] = (stamp, event)
+        if len(sources) < policy.distributed_source_threshold:
+            continue
+
+        evidence = sorted(sources.values(), key=lambda item: (
+            item[0], item[1].source_ip, item[1].event_id,
+            item[1].source_port, item[1].method,
+        ))
+        source_ips = tuple(record.source_ip for _, record in evidence)
+        evidence_ids = tuple(record.event_id for _, record in evidence)
+        start = evidence[0][0].isoformat()
+        end = evidence[-1][0].isoformat()
+        ordinal = group_counts.get(key, 0)
+        group_counts[key] = ordinal + 1
+        fingerprint = json.dumps(
+            ["distributed_account_attempt", key, ordinal, start, end,
+             source_ips, evidence_ids],
+            ensure_ascii=True, separators=(",", ":"),
+        )
+        findings.append(DistributedAccountAttempt(
+            sha256(fingerprint.encode()).hexdigest(), *key, start, end,
+            source_ips, evidence_ids,
+        ))
+        sources.clear()
     return findings
 
 

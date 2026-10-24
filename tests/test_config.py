@@ -13,7 +13,8 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_and_partial_override(self) -> None:
         """Missing fields use documented defaults without mutating input."""
         self.assertEqual(DetectionConfig().to_dict(), {
-            "failure_threshold": 5, "failure_window_seconds": 300,
+            "failure_threshold": 5, "distributed_source_threshold": 5,
+            "failure_window_seconds": 300,
             "success_window_seconds": 600,
         })
         values = {"failure_threshold": 3}
@@ -26,6 +27,7 @@ class ConfigTests(unittest.TestCase):
         """Minimum and maximum policies are accepted at both entry points."""
         for threshold, duration in ((2, 1), (10_000, 86_400)):
             values = {"failure_threshold": threshold,
+                      "distributed_source_threshold": threshold,
                       "failure_window_seconds": duration,
                       "success_window_seconds": duration}
             self.assertEqual(DetectionConfig(**values).to_dict(), values)
@@ -34,6 +36,7 @@ class ConfigTests(unittest.TestCase):
     def test_reject_invalid_numbers_without_coercion(self) -> None:
         """Reject bool, floats, strings, null, and out-of-bounds integers."""
         for field, lower, upper in (("failure_threshold", 2, 10_000),
+                                    ("distributed_source_threshold", 2, 10_000),
                                     ("failure_window_seconds", 1, 86_400),
                                     ("success_window_seconds", 1, 86_400)):
             for value in (True, False, 2.0, "5", None, -1, lower - 1, upper + 1):

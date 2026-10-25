@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "single-source-failure-burst",
+      "expected_rules": ["failure_burst"],
+      "events": [
+        {"event_id":"burst-1","timestamp":"2026-10-10T00:00:00+00:00","host":"lab","username":"demo","source_ip":"192.0.2.10","source_port":2201,"outcome":"failure","method":"password"},
+        {"event_id":"burst-2","timestamp":"2026-10-10T00:00:01+00:00","host":"lab","username":"demo","source_ip":"192.0.2.10","source_port":2202,"outcome":"failure","method":"password"},
+        {"event_id":"burst-3","timestamp":"2026-10-10T00:00:02+00:00","host":"lab","username":"demo","source_ip":"192.0.2.10","source_port":2203,"outcome":"failure","method":"password"},
+        {"event_id":"burst-4","timestamp":"2026-10-10T00:00:03+00:00","host":"lab","username":"demo","source_ip":"192.0.2.10","source_port":2204,"outcome":"failure","method":"password"},
+        {"event_id":"burst-5","timestamp":"2026-10-10T00:00:04+00:00","host":"lab","username":"demo","source_ip":"192.0.2.10","source_port":2205,"outcome":"failure","method":"password"}
+      ]
+    },
+    {
+      "case_id": "distributed-account-attempt",
+      "expected_rules": ["distributed_account_attempt"],
+      "events": [
+        {"event_id":"dist-1","timestamp":"2026-10-10T01:00:00+00:00","host":"lab","username":"admin","source_ip":"192.0.2.1","source_port":2301,"outcome":"failure","method":"password"},
+        {"event_id":"dist-2","timestamp":"2026-10-10T01:00:01+00:00","host":"lab","username":"admin","source_ip":"192.0.2.2","source_port":2302,"outcome":"failure","method":"password"},
+        {"event_id":"dist-3","timestamp":"2026-10-10T01:00:02+00:00","host":"lab","username":"admin","source_ip":"192.0.2.3","source_port":2303,"outcome":"failure","method":"password"},
+        {"event_id":"dist-4","timestamp":"2026-10-10T01:00:03+00:00","host":"lab","username":"admin","source_ip":"192.0.2.4","source_port":2304,"outcome":"failure","method":"password"},
+        {"event_id":"dist-5","timestamp":"2026-10-10T01:00:04+00:00","host":"lab","username":"admin","source_ip":"192.0.2.5","source_port":2305,"outcome":"failure","method":"password"}
+      ]
+    },
+    {
+      "case_id": "isolated-failures",
+      "expected_rules": [],
+      "events": [
+        {"event_id":"quiet-1","timestamp":"2026-10-10T02:00:00+00:00","host":"lab","username":"demo","source_ip":"192.0.2.20","source_port":2401,"outcome":"failure","method":"password"},
+        {"event_id":"quiet-2","timestamp":"2026-10-10T02:10:00+00:00","host":"lab","username":"demo","source_ip":"192.0.2.20","source_port":2402,"outcome":"failure","method":"password"}
+      ]
+    },
+    {
+      "case_id": "successful-authentication",
+      "expected_rules": [],
+      "events": [
+        {"event_id":"success-1","timestamp":"2026-10-10T03:00:00+00:00","host":"lab","username":"demo","source_ip":"192.0.2.30","source_port":2501,"outcome":"success","method":"publickey"}
+      ]
+    }
+  ]
+}

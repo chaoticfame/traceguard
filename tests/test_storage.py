@@ -1,6 +1,7 @@
 """Regression tests for transactional, source-aware occurrence storage."""
 
 from dataclasses import replace
+from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
 import json
@@ -129,7 +130,7 @@ class EventStoreTests(unittest.TestCase):
 
     def test_schema_excludes_raw_logs_and_paths(self):
         self.store.close()
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             columns = {
                 row[1] for row in connection.execute(
                     "PRAGMA table_info(event_occurrences)"
@@ -263,7 +264,7 @@ class FindingStoreTests(unittest.TestCase):
             with EventStore(path) as initial:
                 occurrences = initial.store_occurrences(
                     SOURCE, list(enumerate(self.events, 1)))
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.executescript(
                     "DROP TABLE finding_evidence; DROP TABLE findings; "
                     "PRAGMA user_version = 1;"

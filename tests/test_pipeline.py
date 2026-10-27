@@ -1,6 +1,6 @@
 """Synthetic end-to-end tests for the persistent report pipeline."""
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from hashlib import sha256
 import io
 import json
@@ -68,7 +68,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((first_code, second_code), (0, 0), errors)
         self.assertEqual(second, first)
         self.assertEqual(self.report.read_bytes(), first_report)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT count(*) FROM event_occurrences").fetchone()[0], 3)
             self.assertEqual(connection.execute(

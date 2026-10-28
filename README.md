@@ -1,104 +1,122 @@
 # TraceGuard
 
-Evidence-first SSH authentication log triage, with local AI explanations planned after deterministic detection works.
+TraceGuard is an evidence-first SSH authentication log triage CLI. It parses
+bounded local logs, detects deterministic review candidates, persists exact
+source-position evidence in SQLite, and exports versioned JSON reports.
 
-## End-to-end CLI MVP
+Optional local Ollama explanations annotate findings only after identifiers are
+sanitized. They never replace detector output. The default workflow is fully
+offline and has no third-party runtime dependencies.
 
-TraceGuard can now parse one local SSH log, detect review candidates, persist
-source-position evidence in SQLite, and atomically export a versioned JSON
-report with one command:
+## Requirements
 
-```sh
-python -m traceguard pipeline examples/auth.log --year 2026 --failure-threshold 2 --database traceguard.sqlite3 --report reports/traceguard.json
-```
+- Python 3.11 or newer
+- Windows or Linux
+- Ollama only when local AI explanations are explicitly requested
 
-Create the `reports` directory first. Repeating the command for unchanged input
-is idempotent: identical log lines remain distinct occurrences, while existing
-source positions and findings are not duplicated. The default is fully offline.
-Local Ollama annotations are opt-in with `--ai-model MODEL`; `--offline` always
-disables model requests. AI receives sanitized evidence only and never changes
-detector results. Reports and SQLite databases contain normalized identifiers
-and must be treated as private. Do not commit real logs, databases, or reports.
+## Install from a clean environment
 
-The command prints only bounded counts to stdout. The report contains its schema
-version, SHA-256 source digest, detection configuration, exact evidence links,
-and explanation statuses. A source digest records provenance, not authenticity.
+Clone the repository, enter its directory, and create an isolated environment.
 
-## Day 1: normalized authentication events
-
-Commit: `feat(parser): normalize SSH authentication events with a tested CLI`
-
-Requirements: Python 3.11 or newer. No third-party dependencies, Ollama, administrator privileges, or network access are required today.
-
-From this folder, verify with one command:
+Linux:
 
 ```sh
-python -m unittest discover -s tests -v
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+traceguard --help
 ```
 
-Run the synthetic demonstration:
-
-```sh
-python -m traceguard examples/auth.log --year 2026 --utc-offset-minutes 480
-```
-
-Standard output contains three JSON event records. Standard error contains `parsed=3 skipped=1`. Use the UTC offset of the system that produced the log, not necessarily your computer's current offset. For UTC logs omit the offset option.
-
-## Exact deliverables
-
-- `traceguard/__init__.py`: package definition.
-- `traceguard/parser.py`: immutable event model, bounded record parsing, IP/port validation, UTC normalization, content fingerprints.
-- `traceguard/__main__.py`: streaming JSON Lines CLI and explicit error exit status.
-- `tests/test_parser.py`: nine regression and CLI tests.
-- `examples/auth.log`: synthetic fixture using documentation-only addresses.
-- `.gitignore`: excludes runtime state, private logs, and generated reports.
-- `README.md` and `ROADMAP.md`: operating instructions and functional development plan.
-
-The complete implementation is included in these files; there are no placeholder functions or TODO blocks.
-
-## Supported input and limitations
-
-Day 1 supports legacy English-month syslog lines from `sshd[PID]` containing Failed/Accepted password or publickey authentication records, optionally with a public-key detail suffix. Other records are skipped and counted. RFC3339/journald/Windows logs are not supported yet.
-
-Logs omit year and timezone, so you supply them. A file spanning a year boundary must currently be split by year. Daylight-saving changes require appropriate timestamp context; automatic inference is not implemented. Invalid UTF-8 and file errors return exit code 2; earlier output can exist if an error occurs midway through a file. Successful parsing, even with zero supported records, returns 0 and reports counts.
-
-`event_id` is a content fingerprint, not an occurrence ID. Identical records may represent distinct occurrences. The planned persistence layer must preserve source identity and line position rather than silently deduplicating by fingerprint.
-
-Run against trusted local files. Input is never executed. Parsed output includes usernames and IP addresses: use only synthetic data in public commits. The ignore file is convenience, not a privacy control.
-
-## First commit and push
-
-Create an empty GitHub repository named `traceguard` first, without an initial README. Extract this starter and open a terminal inside its `traceguard` folder. Replace `YOUR_USERNAME` below. The test gate prevents committing or pushing when verification fails.
-
-PowerShell:
+Windows PowerShell:
 
 ```powershell
-python -m unittest discover -s tests -v
-if ($LASTEXITCODE -ne 0) { throw 'Verification failed' }
-git init -b main
-if ($LASTEXITCODE -ne 0) { throw 'Git initialization failed' }
-git add -- .gitignore README.md ROADMAP.md traceguard tests examples
-if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
-git commit -m "feat(parser): normalize SSH authentication events with a tested CLI"
-if ($LASTEXITCODE -ne 0) { throw 'Commit failed' }
-git remote add origin https://github.com/YOUR_USERNAME/traceguard.git
-if ($LASTEXITCODE -ne 0) { throw 'Remote setup failed' }
-git push -u origin main
-if ($LASTEXITCODE -ne 0) { throw 'Push failed' }
+py -3.11 -m venv .venv
+.\.venv\Scripts\python -m pip install .
+.\.venv\Scripts\traceguard --help
 ```
 
-Bash:
+The package installs one `traceguard` console command. Installation needs a
+Python package builder, but the installed application has no runtime package
+dependencies and does not download a model.
 
-```bash
-(
-set -e
-python -m unittest discover -s tests -v
-git init -b main
-git add -- .gitignore README.md ROADMAP.md traceguard tests examples
-git commit -m "feat(parser): normalize SSH authentication events with a tested CLI"
-git remote add origin https://github.com/YOUR_USERNAME/traceguard.git
-git push -u origin main
-)
+## Run the synthetic demonstration
+
+The included fixture uses documentation-only network addresses and contains no
+private authentication data.
+
+```sh
+python -c "from pathlib import Path; Path('reports').mkdir(exist_ok=True)"
+traceguard pipeline examples/auth.log --year 2026 --failure-threshold 2 --database traceguard.sqlite3 --report reports/traceguard.json --offline
 ```
 
-If you already have a repository, use its existing checkout and remote; skip initialization and remote creation. If Linux provides only `python3`, substitute it for `python` in these commands. GitHub authentication and your Git author identity must already be configured. No credentials are included in this starter.
+Expected stdout is a bounded summary containing three parsed occurrences and
+two evidence-linked findings. The SQLite database and report are local runtime
+artifacts and are ignored by Git.
+
+## Commands
+
+Normalize supported SSH authentication records as JSON Lines:
+
+```sh
+traceguard examples/auth.log --year 2026 --utc-offset-minutes 480
+```
+
+Emit deterministic findings without persistence:
+
+```sh
+traceguard triage examples/auth.log --year 2026 --failure-threshold 2
+```
+
+Run the persistent evidence pipeline:
+
+```sh
+traceguard pipeline LOG --year YEAR --database DATABASE --report REPORT
+```
+
+Use `--ai-model MODEL` with `triage` or `pipeline` to opt in to local Ollama
+annotations. Add `--offline` to guarantee that no model request is attempted.
+Only literal loopback Ollama endpoints are accepted.
+
+## Security model
+
+- Input is parsed as data and is never executed.
+- Files, event batches, display fields, model requests, and responses are
+  bounded.
+- Reports link findings to exact stored occurrences instead of trusting model
+  citations.
+- AI receives report-local aliases rather than raw hosts, usernames, IP
+  addresses, paths, or log lines.
+- Model output must match a strict schema and remains an annotation.
+- Generated databases and reports contain security metadata and should be
+  handled as private data.
+
+A finding is a review candidate, not proof of compromise. Thresholds may flag
+legitimate retries, automation, or shared infrastructure. Operators should
+validate the linked evidence and surrounding system context.
+
+## Supported input
+
+TraceGuard supports English-month legacy syslog timestamps and strict
+`YYYY-MM-DDTHH:MM:SS±HH:MM` timestamps from `sshd[PID]` records containing
+failed or accepted password/public-key authentication. Unsupported and malformed
+records are counted without echoing their private contents.
+
+Legacy syslog has no year or timezone, so callers must provide `--year` and, if
+needed, `--utc-offset-minutes`. Automatic daylight-saving inference and Windows
+Event Log input are outside the current scope.
+
+## Development
+
+Run the deterministic suite from the repository root:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+CI runs the same command on Python 3.13 for Windows and Linux with read-only
+repository permissions. Tests use synthetic fixtures and mocked AI transport;
+they require no secrets, running model, or external service.
+
+## License
+
+TraceGuard is distributed under the [MIT License](LICENSE).

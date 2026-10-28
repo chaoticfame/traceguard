@@ -314,6 +314,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 def _parse_parser() -> argparse.ArgumentParser:
     """Build the backward-compatible parser command."""
     parser = argparse.ArgumentParser(
+        prog="traceguard",
         description="Stream normalized SSH events as JSON Lines.",
     )
     _add_log_arguments(parser)
@@ -323,7 +324,7 @@ def _parse_parser() -> argparse.ArgumentParser:
 def _triage_parser() -> argparse.ArgumentParser:
     """Build the deterministic offline triage subcommand."""
     parser = argparse.ArgumentParser(
-        prog="python -m traceguard triage",
+        prog="traceguard triage",
         description="Emit deterministic authentication findings as JSON Lines.",
     )
     _add_log_arguments(parser)
@@ -344,7 +345,7 @@ def _triage_parser() -> argparse.ArgumentParser:
 def _pipeline_parser() -> argparse.ArgumentParser:
     """Build the end-to-end local evidence pipeline command."""
     parser = argparse.ArgumentParser(
-        prog="python -m traceguard pipeline",
+        prog="traceguard pipeline",
         description="Persist SSH evidence and atomically export a versioned report.",
     )
     _add_log_arguments(parser)

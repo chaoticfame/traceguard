@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traceguard"
+version = "0.1.0"
+description = "Evidence-first SSH authentication log triage"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "dems" },
+]
+keywords = ["cybersecurity", "incident-response", "ssh", "log-analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.scripts]
+traceguard = "traceguard.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/chaoticfame/traceguard"
+Issues = "https://github.com/chaoticfame/traceguard/issues"
+
+[tool.setuptools]
+packages = ["traceguard"]
